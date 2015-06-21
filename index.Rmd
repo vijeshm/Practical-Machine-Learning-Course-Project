@@ -1,0 +1,137 @@
+---
+title: "Coursera Practical Machine Learning - Course Project"
+output: html_document
+---
+
+# Executive Summary
+The raw data has been partitioned into training set and test set already. We'll now load only the training set data into R and perform some exploratory analysis. Based on the insights gained by the exploratory analysis, we will build a model/models to predict the class of new data points. During training, we will split the training dataset into partitions and use the partitions to evaluate the accuracy of our models. The best model will be chosen to perform predictions on the test set. The same model will be used for the final submission as well.
+
+```{r, echo=FALSE, include=FALSE}
+# Seeding and imports
+set.seed(1)
+library(ggplot2)
+library(caret)
+library(gridExtra)
+library(randomForest)
+```
+
+# Loading Data
+```{r}
+data <- read.csv('~/Coursera/Practical Machine Learning/Workspace/Course Project/pml-training.csv', as.is=TRUE, na.strings=c('', NA))
+data <- data[data$new_window == "no", ]
+```
+
+Number of rows in the training dataset: `r dim(data)[1]`<br>
+Number of columns in the training dataset: `r dim(data)[2]`<br>
+
+Setting the default configurations for training the model:
+```{r}
+p <- 0.75
+k <- 10
+correlationThreshold <- 0.8
+```
+
+# Preprocessing Data
+`user_name` and `classe` columns must be converted to `factor` variables to indicate categorical data.
+```{r}
+data$classe <- as.factor(data$classe)
+data$user_name <- as.factor(data$user_name)
+```
+
+For training the model, we partition the dataset into training data and test data, with probability `p` equal to `r p`.
+```{r}
+inTrain <- createDataPartition(data$classe, p = p, list = FALSE)
+training <- data[inTrain, ]
+testing <- data[-inTrain, ]
+```
+
+The data contains large number of summary columns. Since summary rows have been removed, those columns contain only `NA` values and are no longer relevant. Hence, these columns can be removed.
+
+```{r}
+summary.columns <- apply(training, 2, function(x) {return(sum(is.na(x)))}) > 0
+training <- training[, !summary.columns]
+```
+
+Variables like `raw_timestamp_part_1`, `cvtd_timestamp` and `num_window` capture the functional information related to data collection for a particular user. When we plot these variables, we can see a clear clustering of the readings.
+```{r}
+ggplot(training, aes(x = user_name, y = cvtd_timestamp, colour = classe)) + geom_point()
+```
+
+Since these variables are functional aspects of data collection, it shouldn't be included in the model.
+```{r}
+classe <- data.frame(training$classe) #temporary cache for classe while other data is being transformed
+relevant.features <- 8:(dim(training)[2] - 1)
+training <- training[, relevant.features]
+training <- data.frame(lapply(training, as.numeric))
+```
+
+We remove the highly correlated variables to avoid redundancy.
+```{r}
+highly.corelated <- findCorrelation(cor(training), cutoff = correlationThreshold)
+training <- training[, -highly.corelated]
+```
+
+We can now add back the `classe` column to the dataset.
+```{r}
+training[, "classe"] <- classe
+```
+
+As a result of the preprocessing, we were able to reduce the number of variables to `r dim(training)[2]`. Exploratory data analysis on the remaining data showed multiple class-based clusters. Based on clusters distribution random forests seems to be a good choice.
+
+```{r}
+grid.arrange(
+    ggplot(training, aes(x = accel_arm_z, y = yaw_belt, colour = classe)) + geom_point(),
+    ggplot(training, aes(x = pitch_dumbbell, y = total_accel_belt, colour = classe)) + geom_point(),
+    ggplot(training, aes(x = total_accel_arm, y = yaw_forearm, colour = classe)) + geom_point(),
+    ggplot(training, aes(x = roll_arm, y = total_accel_forearm, colour = classe)) + geom_point(),
+    ncol = 2
+)
+```
+
+# K-Fold Cross Validation
+We use `r k`-fold cross validation to estimate out-of-sample error.
+```{r cache=TRUE}
+folds <- caret::createFolds(training$classe, k=k, list=TRUE, returnTrain=FALSE)
+modelFits <- lapply(folds, function(fold) {
+    return(
+        list(
+            modelFitRF = NA,
+            predictionRF = NA,
+            result = NA
+        )
+    )
+})
+
+for (i in 1:k) {
+    
+    fold <- folds[[i]]
+    modelFitRF <- caret::train(
+        classe ~ ., method='rf', data=training[-fold, ]
+    )
+    predictionRF <- predict(modelFitRF, training[fold, ])
+    result <- caret::confusionMatrix(
+        predictionRF, training[fold, ]$classe
+    )
+    modelFits[[i]] <- list(
+        modelFitRF = modelFitRF,
+        predictionRF = predictionRF,
+        result = result
+    )
+}
+
+mean.accuracy <- mean(sapply(modelFits, function(x) { return(x$result$overall[[1]]) }))
+sd.accuracy <- sd(sapply(modelFits, function(x) { return(x$result$overall[[1]]) }))
+sqrt.n <- sqrt(k)
+se.accuracy <- sd.accuracy / sqrt.n
+ci <- list(lower=round(mean.accuracy - se.accuracy * 1.96, 4), upper=round(mean.accuracy + se.accuracy * 1.96, 4))
+```
+
+Based on the results of the cross-validation step we can calculate 95% confidence interval for accuracy as (`r ci$lower`, `r ci$upper`).
+
+# Results
+The best performing model from the random forest has been applied to the testing set. The same model has been used for the final submission as well.
+```{r}
+modelFitRF <- modelFits[[which.max(sapply(modelFits, function(x) { return(x$result$overall[[1]]) }))]]$modelFitRF
+predictionRF <- predict(modelFitRF, testing)
+confusionMatrix(predictionRF, testing$classe)
+```
